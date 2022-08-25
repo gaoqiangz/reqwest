@@ -72,6 +72,12 @@ enum HttpVersionPref {
     All,
 }
 
+/// An executor of futures.
+pub trait Executor {
+    /// Place the future into the executor to be run.
+    fn execute(&self, fut: Pin<Box<dyn Future<Output = ()> + Send>>);
+}
+
 struct Config {
     // NOTE: When adding a new field, update `fmt::Debug for ClientBuilder`
     accepts: Accepts,
@@ -121,6 +127,7 @@ struct Config {
     error: Option<crate::Error>,
     https_only: bool,
     dns_overrides: HashMap<String, SocketAddr>,
+    executor: Option<Box<dyn Executor + Send + Sync + 'static>>,
 }
 
 impl Default for ClientBuilder {
@@ -188,6 +195,7 @@ impl ClientBuilder {
                 cookie_store: None,
                 https_only: false,
                 dns_overrides: HashMap::new(),
+                executor: None,
             },
         }
     }
@@ -506,6 +514,16 @@ impl ClientBuilder {
 
         if config.http1_allow_obsolete_multiline_headers_in_responses {
             builder.http1_allow_obsolete_multiline_headers_in_responses(true);
+        }
+
+        if let Some(executor) = config.executor {
+            struct ExecutorWrap(Box<dyn Executor + Send + Sync + 'static>);
+            impl hyper::rt::Executor<Pin<Box<dyn Future<Output = ()> + Send>>> for ExecutorWrap {
+                fn execute(&self, fut: Pin<Box<dyn Future<Output = ()> + Send>>) {
+                    self.0.execute(fut)
+                }
+            }
+            builder.executor(ExecutorWrap(executor));
         }
 
         let hyper_client = builder.build(connector);
@@ -1324,6 +1342,15 @@ impl ClientBuilder {
     /// to the conventional port for the given scheme (e.g. 80 for http).
     pub fn resolve(mut self, domain: &str, addr: SocketAddr) -> ClientBuilder {
         self.config.dns_overrides.insert(domain.to_string(), addr);
+        self
+    }
+
+    /// Provide an executor to execute background `Connection` tasks.
+    pub fn executor<E>(mut self, exec: E) -> ClientBuilder
+    where
+        E: Executor + Send + Sync + 'static,
+    {
+        self.config.executor = Some(Box::new(exec));
         self
     }
 }
